@@ -52,7 +52,7 @@ jobs:
               -o "dist/tender-darwin-$arch" ./cmd/tender
           done
           file dist/*
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: darwin
           path: dist/
@@ -78,7 +78,7 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: darwin
           path: dist/
@@ -111,7 +111,7 @@ jobs:
             dist/tender-*
             dist/SHA256SUMS
             dist/SHA256SUMS.sigstore.json
-      - uses: oras-project/setup-oras@v1
+      - uses: oras-project/setup-oras@v2
       - name: Push tender as an OCI artifact
         id: push
         env:
