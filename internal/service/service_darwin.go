@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 func plistPath() (string, error) {
@@ -14,7 +15,14 @@ func plistPath() (string, error) {
 	return filepath.Join(home, "Library", "LaunchAgents", Label+".plist"), nil
 }
 
-// Install writes the LaunchAgent and starts it, replacing one that runs.
+func system() launchd {
+	return launchd{run: func(args ...string) error { return run("launchctl", args...) }, sleep: time.Sleep}
+}
+
+func domain() string { return fmt.Sprintf("gui/%d", os.Getuid()) }
+
+// Install writes the LaunchAgent and leaves it loaded on this build, as
+// often as it is run.
 func Install(s Spec) (string, error) {
 	path, err := plistPath()
 	if err != nil {
@@ -23,12 +31,7 @@ func Install(s Spec) (string, error) {
 	if err := os.MkdirAll(s.LogDir, 0o700); err != nil {
 		return "", err
 	}
-	if err := writeFile(path, LaunchAgent(s)); err != nil {
-		return "", err
-	}
-	domain := fmt.Sprintf("gui/%d", os.Getuid())
-	_ = run("launchctl", "bootout", domain+"/"+Label) // not loaded yet is fine
-	if err := run("launchctl", "bootstrap", domain, path); err != nil {
+	if err := system().install(domain(), Label, path, []byte(LaunchAgent(s))); err != nil {
 		return "", err
 	}
 	return path, nil
@@ -40,9 +43,5 @@ func Uninstall() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	_ = run("launchctl", "bootout", fmt.Sprintf("gui/%d/%s", os.Getuid(), Label))
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return "", err
-	}
-	return path, nil
+	return path, system().uninstall(domain(), Label, path)
 }
