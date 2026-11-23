@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.5](https://github.com/orchard-suite/tender/compare/v0.0.4...v0.0.5) (2026-11-23)
+
+### Bug Fixes
+
+* **tender:** log the time as timestamp ([a234991](https://github.com/orchard-suite/tender/commit/a23499103d4c2b4f65708c7dff4c79856e1dc73b))
+
 ## [0.0.4](https://github.com/orchard-suite/tender/compare/v0.0.3...v0.0.4) (2026-11-23)
 
 ### Bug Fixes
