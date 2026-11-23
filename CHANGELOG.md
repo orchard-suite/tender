@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.3](https://github.com/orchard-suite/tender/compare/v0.0.2...v0.0.3) (2026-11-23)
+
+### Bug Fixes
+
+* **tender:** renew with a token, not mtls ([e76aa0f](https://github.com/orchard-suite/tender/commit/e76aa0f01e3458ad624d02dff40a41c86c8c15f6))
+
 ## [0.0.2](https://github.com/orchard-suite/tender/compare/v0.0.1...v0.0.2) (2026-11-23)
 
 ### Bug Fixes
