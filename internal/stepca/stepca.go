@@ -5,8 +5,9 @@
 // Enrollment: the person signs in through the browser to the authority's
 // OIDC provisioner (the authorization code flow with PKCE, on a loopback
 // redirect), and Tender hands the ID token to /1.0/sign as the one-time
-// token beside its signing request. Renewal: /1.0/renew, with the current
-// certificate as the TLS client certificate.
+// token beside its signing request. Renewal: /1.0/renew, with a token the
+// current certificate's key signs as the bearer, so it passes a proxy that
+// ends TLS in front of the authority.
 package stepca
 
 import (
@@ -16,6 +17,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -26,6 +28,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/orchard-suite/tender/internal/assertion"
 )
 
 // Authority is this package's name in an enrollment record.
@@ -76,7 +80,7 @@ func New(ctx context.Context, caURL, fingerprint, rootPEM string) (*Client, erro
 			return nil, err
 		}
 	}
-	c.HTTP = &http.Client{Timeout: 30 * time.Second, Transport: c.transport(nil)}
+	c.HTTP = &http.Client{Timeout: 30 * time.Second, Transport: c.transport()}
 	return c, nil
 }
 
@@ -88,16 +92,13 @@ func (c *Client) RootPEM() string {
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.Root.Raw}))
 }
 
-func (c *Client) transport(cert *tls.Certificate) *http.Transport {
+func (c *Client) transport() *http.Transport {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	if c.Root != nil {
 		pool := x509.NewCertPool()
 		pool.AddCert(c.Root)
 		t.TLSClientConfig.RootCAs = pool
-	}
-	if cert != nil {
-		t.TLSClientConfig.Certificates = []tls.Certificate{*cert}
 	}
 	return t
 }
@@ -220,19 +221,72 @@ func (c *Client) Sign(ctx context.Context, csrDER []byte, ott string) ([]*x509.C
 	return resp.chain()
 }
 
-// Renew asks the authority for a new certificate for the same key, proving
-// the current one with TLS client authentication.
+// RenewIssuer is the iss of a renewal token, as step's own client sends it.
+const RenewIssuer = "step-ca-client/1.0"
+
+// RenewTokenLifetime is how long a renewal token lives.
+const RenewTokenLifetime = 5 * time.Minute
+
+// renewHeader is a renewal token's header. step-ca reads the chain from
+// x5cInsecure, which it verifies against its roots without checking
+// validity, so an expired certificate can still prove its key.
+type renewHeader struct {
+	Alg         string   `json:"alg"`
+	Typ         string   `json:"typ"`
+	X5CInsecure []string `json:"x5cInsecure"`
+}
+
+// RenewClaims are a renewal token's claims.
+type RenewClaims struct {
+	Iss string `json:"iss"`
+	Sub string `json:"sub"` // the certificate's common name
+	Aud string `json:"aud"` // the renew URL
+	Iat int64  `json:"iat"`
+	Nbf int64  `json:"nbf"`
+	Exp int64  `json:"exp"`
+	Jti string `json:"jti"`
+}
+
+// Renew asks the authority for a new certificate for the same key. It
+// proves the current certificate with a token signed by its key, sent as
+// Authorization: Bearer, not with TLS client authentication, so it passes
+// a proxy that ends TLS in front of the authority.
 func (c *Client) Renew(ctx context.Context, chain []*x509.Certificate, key crypto.Signer) ([]*x509.Certificate, error) {
-	cert := &tls.Certificate{PrivateKey: key, Leaf: chain[0]}
-	for _, x := range chain {
-		cert.Certificate = append(cert.Certificate, x.Raw)
+	renewURL := c.URL.JoinPath("1.0", "renew").String()
+	tok, err := renewToken(key, chain, renewURL, time.Now())
+	if err != nil {
+		return nil, fmt.Errorf("renew: %w", err)
 	}
-	hc := &http.Client{Timeout: 30 * time.Second, Transport: c.transport(cert)}
 	var resp signResponse
-	if err := call(ctx, hc, http.MethodPost, c.URL.JoinPath("1.0", "renew").String(), nil, &resp); err != nil {
+	if err := callAuth(ctx, c.HTTP, http.MethodPost, renewURL, "Bearer "+tok, nil, &resp); err != nil {
 		return nil, fmt.Errorf("renew: %w", err)
 	}
 	return resp.chain()
+}
+
+func renewToken(key crypto.Signer, chain []*x509.Certificate, aud string, now time.Time) (string, error) {
+	alg, err := assertion.Algorithm(key.Public())
+	if err != nil {
+		return "", err
+	}
+	h := renewHeader{Alg: alg, Typ: "JWT"}
+	for _, x := range assertion.WithoutRoot(chain) {
+		h.X5CInsecure = append(h.X5CInsecure, base64.StdEncoding.EncodeToString(x.Raw))
+	}
+	jti, err := assertion.NewID()
+	if err != nil {
+		return "", err
+	}
+	claims := RenewClaims{
+		Iss: RenewIssuer,
+		Sub: chain[0].Subject.CommonName,
+		Aud: aud,
+		Iat: now.Unix(),
+		Nbf: now.Unix(),
+		Exp: now.Add(RenewTokenLifetime).Unix(),
+		Jti: jti,
+	}
+	return assertion.Compact(key, alg, h, claims)
 }
 
 // DueForRenewal reports whether less than a third of a certificate's life
@@ -243,6 +297,10 @@ func DueForRenewal(leaf *x509.Certificate, now time.Time) bool {
 }
 
 func call(ctx context.Context, hc *http.Client, method, u string, in, out any) error {
+	return callAuth(ctx, hc, method, u, "", in, out)
+}
+
+func callAuth(ctx context.Context, hc *http.Client, method, u, authorization string, in, out any) error {
 	var body io.Reader = http.NoBody
 	if in != nil {
 		b, err := json.Marshal(in)
@@ -257,6 +315,9 @@ func call(ctx context.Context, hc *http.Client, method, u string, in, out any) e
 	}
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if authorization != "" {
+		req.Header.Set("Authorization", authorization)
 	}
 	resp, err := hc.Do(req)
 	if err != nil {

@@ -15,7 +15,8 @@ machines, not a member.
 | `internal/agent` | The ask and post state machine: schedule, hold, backoff, replace |
 | `internal/assertion` | The `Authorization: Device` JWS |
 | `internal/identity` | The device's certificate and key: keychain, certificate store, or files |
-| `internal/stepca` | The one certificate authority Tender knows: step-ca, with OIDC sign-in |
+| `internal/stepca` | The one certificate authority Tender knows: step-ca, with OIDC sign-in and bearer-token renewal |
+| `internal/stepca/stepcatest` | A step-ca for tests that checks renewal tokens as step-ca does |
 | `internal/reader` | The reader interface and the 512-byte string limit |
 | `internal/readers/<name>` | One adapter per member's reader module |
 | `internal/state`, `internal/config`, `internal/logfile` | The state file, `tender.yaml` and its paths, the JSON log |

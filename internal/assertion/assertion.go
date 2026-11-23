@@ -79,8 +79,8 @@ func Sign(k Key, method string, u *url.URL, body []byte, now time.Time) (string,
 	for _, c := range WithoutRoot(k.Chain) {
 		h.X5C = append(h.X5C, base64.StdEncoding.EncodeToString(c.Raw))
 	}
-	jti := make([]byte, 16)
-	if _, err := rand.Read(jti); err != nil {
+	jti, err := NewID()
+	if err != nil {
 		return "", err
 	}
 	sum := sha256.Sum256(body)
@@ -91,22 +91,38 @@ func Sign(k Key, method string, u *url.URL, body []byte, now time.Time) (string,
 		Bh:  b64.EncodeToString(sum[:]),
 		Iat: now.Unix(),
 		Exp: now.Add(Lifetime).Unix(),
-		Jti: b64.EncodeToString(jti),
+		Jti: jti,
 	}
-	hj, err := json.Marshal(h)
+	return Compact(k.Signer, alg, h, c)
+}
+
+// Compact signs a header and claims as a compact JWS with alg, which must
+// be what Algorithm says for the signer's key. The header must already
+// carry alg.
+func Compact(s crypto.Signer, alg string, header, claims any) (string, error) {
+	hj, err := json.Marshal(header)
 	if err != nil {
 		return "", err
 	}
-	cj, err := json.Marshal(c)
+	cj, err := json.Marshal(claims)
 	if err != nil {
 		return "", err
 	}
 	input := b64.EncodeToString(hj) + "." + b64.EncodeToString(cj)
-	sig, err := sign(k.Signer, alg, []byte(input))
+	sig, err := sign(s, alg, []byte(input))
 	if err != nil {
-		return "", fmt.Errorf("assertion: sign: %w", err)
+		return "", fmt.Errorf("sign: %w", err)
 	}
 	return input + "." + b64.EncodeToString(sig), nil
+}
+
+// NewID is 16 random bytes, base64url: a token's jti.
+func NewID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return b64.EncodeToString(b), nil
 }
 
 // TargetURI is the request URL without its query or fragment.

@@ -2,14 +2,12 @@ package stepca_test
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
-	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -21,6 +19,7 @@ import (
 
 	"github.com/orchard-suite/tender/internal/identity"
 	"github.com/orchard-suite/tender/internal/stepca"
+	"github.com/orchard-suite/tender/internal/stepca/stepcatest"
 	"github.com/orchard-suite/tender/internal/testpki"
 )
 
@@ -89,86 +88,10 @@ func (idp *fakeIdP) browser(t *testing.T) stepca.Browser {
 	}
 }
 
-// fakeCA is a step-ca that signs with an in-memory intermediate.
-type fakeCA struct {
-	srv  *httptest.Server
-	pki  *testpki.PKI
-	idp  *fakeIdP
-	life time.Duration
-}
-
-func newCA(t *testing.T, idp *fakeIdP) *fakeCA {
-	ca := &fakeCA{pki: testpki.New(t), idp: idp, life: 24 * time.Hour}
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /root/{fp}", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]string{"ca": pemOf(ca.srv.Certificate())})
-	})
-	mux.HandleFunc("GET /provisioners", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"provisioners": []map[string]string{
-			{"type": "JWK", "name": "admin"},
-			{"type": "OIDC", "name": "people", "clientID": "tender-client", "configurationEndpoint": idp.srv.URL + "/.well-known/openid-configuration"},
-		}})
-	})
-	mux.HandleFunc("POST /1.0/sign", func(w http.ResponseWriter, r *http.Request) {
-		var req struct{ CSR, OTT string }
-		json.NewDecoder(r.Body).Decode(&req)
-		if req.OTT == "" || req.OTT != idp.token {
-			w.WriteHeader(401)
-			json.NewEncoder(w).Encode(map[string]string{"message": "the token is not valid"})
-			return
-		}
-		block, _ := pem.Decode([]byte(req.CSR))
-		csr, err := x509.ParseCertificateRequest(block.Bytes)
-		if err != nil || csr.CheckSignature() != nil {
-			w.WriteHeader(400)
-			return
-		}
-		ca.issue(t, w, csr.PublicKey, csr.Subject, csr.EmailAddresses)
-	})
-	mux.HandleFunc("POST /1.0/renew", func(w http.ResponseWriter, r *http.Request) {
-		if len(r.TLS.PeerCertificates) == 0 {
-			w.WriteHeader(401)
-			json.NewEncoder(w).Encode(map[string]string{"message": "no client certificate"})
-			return
-		}
-		roots := x509.NewCertPool()
-		roots.AddCert(ca.pki.Root)
-		inter := x509.NewCertPool()
-		for _, c := range r.TLS.PeerCertificates[1:] {
-			inter.AddCert(c)
-		}
-		leaf := r.TLS.PeerCertificates[0]
-		if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, Intermediates: inter, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
-			w.WriteHeader(401)
-			json.NewEncoder(w).Encode(map[string]string{"message": err.Error()})
-			return
-		}
-		ca.issue(t, w, leaf.PublicKey, leaf.Subject, leaf.EmailAddresses)
-	})
-	ca.srv = httptest.NewUnstartedServer(mux)
-	ca.srv.TLS = &tls.Config{ClientAuth: tls.RequestClientCert}
-	ca.srv.StartTLS()
-	t.Cleanup(ca.srv.Close)
+func newCA(t *testing.T, idp *fakeIdP) *stepcatest.CA {
+	ca := stepcatest.New(t)
+	ca.Configuration = idp.srv.URL + "/.well-known/openid-configuration"
 	return ca
-}
-
-func (ca *fakeCA) issue(t *testing.T, w http.ResponseWriter, pub any, subject pkix.Name, emails []string) {
-	leaf := ca.pki.Device(t, pub, subject.CommonName, strings.Join(emails, ""), time.Now().Add(-time.Minute), time.Now().Add(ca.life))
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]any{
-		"crt":       pemOf(leaf),
-		"ca":        pemOf(ca.pki.Intermediate),
-		"certChain": []string{pemOf(leaf), pemOf(ca.pki.Intermediate)},
-	})
-}
-
-func pemOf(c *x509.Certificate) string {
-	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.Raw}))
-}
-
-func fingerprint(c *x509.Certificate) string {
-	sum := sha256.Sum256(c.Raw)
-	return hex.EncodeToString(sum[:])
 }
 
 func TestEnrollThenRenew(t *testing.T) {
@@ -176,7 +99,7 @@ func TestEnrollThenRenew(t *testing.T) {
 	idp := newIdP(t)
 	ca := newCA(t, idp)
 
-	client, err := stepca.New(ctx, ca.srv.URL, fingerprint(ca.srv.Certificate()), "")
+	client, err := stepca.New(ctx, ca.Server.URL, ca.Fingerprint(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,6 +114,7 @@ func TestEnrollThenRenew(t *testing.T) {
 	if signIn.Email != "user@example.com" {
 		t.Errorf("email = %q", signIn.Email)
 	}
+	ca.IDToken = signIn.IDToken
 
 	dir := t.TempDir()
 	store := &identity.FileStore{Key: filepath.Join(dir, "device.key"), Cert: filepath.Join(dir, "device.crt")}
@@ -214,13 +138,13 @@ func TestEnrollThenRenew(t *testing.T) {
 	}
 
 	// A client made from the saved root, as the agent makes it later.
-	again, err := stepca.New(ctx, ca.srv.URL, "", client.RootPEM())
+	again, err := stepca.New(ctx, ca.Server.URL, "", client.RootPEM())
 	if err != nil {
 		t.Fatal(err)
 	}
 	renewed, err := again.Renew(ctx, chain, signer)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("%v (refusals: %v)", err, ca.Refusals())
 	}
 	if renewed[0].SerialNumber.Cmp(chain[0].SerialNumber) == 0 {
 		t.Error("renewal returned the same certificate")
@@ -228,11 +152,70 @@ func TestEnrollThenRenew(t *testing.T) {
 	if identity.PublicKeyID(renewed[0].PublicKey) != identity.PublicKeyID(signer.Public()) {
 		t.Error("renewal changed the key")
 	}
+	if ca.Renewals() != 1 {
+		t.Errorf("renewals = %d", ca.Renewals())
+	}
+}
+
+func TestRenewWithAnRSAKey(t *testing.T) {
+	ca := newCA(t, newIdP(t))
+	client, err := stepca.New(context.Background(), ca.Server.URL, ca.Fingerprint(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := rsaKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf := ca.Issue(t, key.Public(), "laptop-1", "user@example.com", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	if _, err := client.Renew(context.Background(), []*x509.Certificate{leaf, ca.PKI.Intermediate}, key); err != nil {
+		t.Fatalf("%v (refusals: %v)", err, ca.Refusals())
+	}
+}
+
+func TestRenewalWithoutATokenIsRefused(t *testing.T) {
+	ca := newCA(t, newIdP(t))
+	req, _ := http.NewRequest(http.MethodPost, ca.Server.URL+"/1.0/renew", nil)
+	resp, err := ca.Server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest || ca.Renewals() != 0 {
+		t.Errorf("a renewal with no token got %d", resp.StatusCode)
+	}
+}
+
+func TestRenewalSignedByAnotherKeyIsRefused(t *testing.T) {
+	ca := newCA(t, newIdP(t))
+	client, err := stepca.New(context.Background(), ca.Server.URL, ca.Fingerprint(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := testpki.Key(t)
+	leaf := ca.Issue(t, key.Public(), "laptop-1", "user@example.com", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	_, err = client.Renew(context.Background(), []*x509.Certificate{leaf, ca.PKI.Intermediate}, testpki.Key(t))
+	if err == nil || !strings.Contains(err.Error(), "bad signature") || ca.Renewals() != 0 {
+		t.Errorf("a token from another key renewed: %v", err)
+	}
+}
+
+func TestExpiredCertificateCanStillRenew(t *testing.T) {
+	ca := newCA(t, newIdP(t))
+	client, err := stepca.New(context.Background(), ca.Server.URL, ca.Fingerprint(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := testpki.Key(t)
+	leaf := ca.Issue(t, key.Public(), "laptop-1", "user@example.com", time.Now().Add(-50*time.Minute), time.Now().Add(-10*time.Minute))
+	if _, err := client.Renew(context.Background(), []*x509.Certificate{leaf, ca.PKI.Intermediate}, key); err != nil {
+		t.Fatalf("%v (refusals: %v)", err, ca.Refusals())
+	}
 }
 
 func TestWrongFingerprintIsRefused(t *testing.T) {
 	ca := newCA(t, newIdP(t))
-	if _, err := stepca.New(context.Background(), ca.srv.URL, strings.Repeat("ab", 32), ""); err == nil {
+	if _, err := stepca.New(context.Background(), ca.Server.URL, strings.Repeat("ab", 32), ""); err == nil {
 		t.Error("a root that does not match the fingerprint was trusted")
 	}
 }
@@ -240,7 +223,7 @@ func TestWrongFingerprintIsRefused(t *testing.T) {
 func TestSignWithoutTheSignInIsRefused(t *testing.T) {
 	ctx := context.Background()
 	ca := newCA(t, newIdP(t))
-	client, err := stepca.New(ctx, ca.srv.URL, fingerprint(ca.srv.Certificate()), "")
+	client, err := stepca.New(ctx, ca.Server.URL, ca.Fingerprint(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,3 +243,5 @@ func TestDueForRenewalAtAThirdOfLifeLeft(t *testing.T) {
 		}
 	}
 }
+
+func rsaKey() (*rsa.PrivateKey, error) { return rsa.GenerateKey(rand.Reader, 2048) }

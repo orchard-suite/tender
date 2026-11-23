@@ -154,23 +154,45 @@ authority's root when its TLS is under that root; leave it out when the
 system trusts the authority.
 
 `tender run` renews the certificate it enrolled when less than a third of
-its life is left, with step-ca's `/1.0/renew` and the current certificate
-as the TLS client certificate. `tender renew` does it now if it is due;
-`tender renew --force` does it whatever is left. A certificate device
-management issued is never renewed by Tender.
+its life is left. `tender renew` does it now if it is due; `tender renew
+--force` does it whatever is left. A certificate device management issued
+is never renewed by Tender.
 
-step-ca's default OIDC template names the certificate after the token, not
-the request. Give the provisioner a template that keeps the request's
-subject and the person's email, for client authentication only:
+Renewal is a `POST` to step-ca's `/1.0/renew` with `Authorization: Bearer
+<token>`, never TLS client authentication, so it works when a proxy ends
+TLS in front of the authority. The token is what `step ca renew
+--mtls=false` sends: a JWT signed by the current certificate's key, in
+the store where it lives, with the chain (leaf first, no root) in its
+`x5cInsecure` header and the claims `iss` `step-ca-client/1.0`, `sub` the
+certificate's common name, `aud` the renew URL, `iat`, `nbf`, `exp` (five
+minutes), and `jti`.
 
-```json
-{
-  "subject": {{ toJson .Insecure.CR.Subject }},
-  "sans": {{ toJson .SANs }},
-  "keyUsage": ["digitalSignature"],
-  "extKeyUsage": ["clientAuth"]
-}
-```
+What an estate sets on its step-ca:
+
+- **The provisioner allows renewal.** Leave `claims.disableRenewal` unset
+  or `false` on the OIDC provisioner. To let a machine that was off past
+  its certificate's end renew without enrolling again, set
+  `claims.allowRenewalAfterExpiry: true`.
+- **The template keeps the request's subject and the person's email, for
+  client authentication.** step-ca's default OIDC template names the
+  certificate after the token, not the request. Renewal also needs the
+  digital signature key usage: step-ca refuses a renewal token whose
+  certificate cannot sign.
+
+  ```json
+  {
+    "subject": {{ toJson .Insecure.CR.Subject }},
+    "sans": {{ toJson .SANs }},
+    "keyUsage": ["digitalSignature"],
+    "extKeyUsage": ["clientAuth"]
+  }
+  ```
+
+- **`dnsNames` holds the name Tender reaches it by.** step-ca takes a
+  renewal token only when its `aud`, `https://<name>/1.0/renew`, names one
+  of the authority's `dnsNames`. Behind a proxy, that is the public name.
+- **The proxy passes `/1.0/renew` and its `Authorization` header** on to
+  step-ca unchanged.
 
 [step-ca]: https://smallstep.com/docs/step-ca/
 
