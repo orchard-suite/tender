@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.4](https://github.com/orchard-suite/tender/compare/v0.0.3...v0.0.4) (2026-11-23)
+
+### Bug Fixes
+
+* **tender:** reinstall the launch agent cleanly ([3a06f57](https://github.com/orchard-suite/tender/commit/3a06f57866bc57b4bffb9c76efc700d76bf596ea))
+
 ## [0.0.3](https://github.com/orchard-suite/tender/compare/v0.0.2...v0.0.3) (2026-11-23)
 
 ### Bug Fixes
