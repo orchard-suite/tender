@@ -1,0 +1,50 @@
+name: Release
+
+# Every push to main is tested and may release.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+  # The build signs the programs keyless; a called workflow gets no more than this.
+  id-token: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  test:
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/test.yml
+
+  version:
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      released: ${{ steps.release.outputs.released }}
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      # The branch tip, not the pushed commit: a run queued behind another
+      # release must see that release's version commit and tags.
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+      - id: release
+        uses: dsswift/release-damnit@v1.9.2
+        with:
+          since-last-release: 'true'
+          publish: 'true'
+
+  build:
+    needs: version
+    if: needs.version.outputs.released == 'true'
+    uses: ./.github/workflows/build.yml
+    with:
+      tag: ${{ needs.version.outputs.tag }}

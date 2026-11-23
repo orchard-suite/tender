@@ -1,0 +1,142 @@
+name: Build
+
+# The release calls this with the new tag, such as v0.1.0. It builds tender
+# for each platform and publishes it twice: as the release's assets, with
+# SHA256SUMS and its keyless signature bundle, and as one signed OCI
+# artifact, ghcr.io/orchard-suite/tender:cli-<version>, one layer a file,
+# signed with cosign keyless as this workflow's identity, so a machine or an
+# estate's forge can verify it and install it with no GitHub credential.
+#
+# macOS builds on a Mac: the keychain is reached through cgo. Linux and
+# Windows build anywhere with cgo off.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        type: string
+        required: true
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+env:
+  IMAGE: ghcr.io/orchard-suite/tender
+
+jobs:
+  darwin:
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: |
+          set -eu
+          version=$(cat VERSION)
+          mkdir -p dist
+          for arch in arm64 amd64; do
+            CGO_ENABLED=1 GOOS=darwin GOARCH=$arch go build -trimpath \
+              -ldflags "-s -w -X github.com/orchard-suite/tender/internal/cli.Version=${version}" \
+              -o "dist/tender-darwin-$arch" ./cmd/tender
+          done
+          file dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: darwin
+          path: dist/
+
+  program:
+    needs: darwin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Check the tag matches VERSION
+        id: version
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          version=$(cat VERSION)
+          if [ "v$version" != "$TAG" ]; then
+            echo "Tag $TAG does not match VERSION $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with:
+          name: darwin
+          path: dist/
+      - name: Build
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -eu
+          for target in linux/amd64 linux/arm64 windows/amd64 windows/arm64; do
+            os=${target%/*}; arch=${target#*/}
+            ext=""; [ "$os" = windows ] && ext=".exe"
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath \
+              -ldflags "-s -w -X github.com/orchard-suite/tender/internal/cli.Version=${VERSION}" \
+              -o "dist/tender-$os-$arch$ext" ./cmd/tender
+          done
+          (cd dist && sha256sum tender-* > SHA256SUMS && cat SHA256SUMS)
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign the checksums
+        run: |
+          cd dist
+          cosign sign-blob --yes --bundle SHA256SUMS.sigstore.json SHA256SUMS > /dev/null
+          cosign verify-blob --bundle SHA256SUMS.sigstore.json \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp '^https://github.com/${{ github.repository }}/' SHA256SUMS
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ inputs.tag }}
+          files: |
+            dist/tender-*
+            dist/SHA256SUMS
+            dist/SHA256SUMS.sigstore.json
+      - uses: oras-project/setup-oras@v1
+      - name: Push tender as an OCI artifact
+        id: push
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          echo "$TOKEN" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+          cd dist
+          files=""
+          for f in tender-*; do files="$files $f:application/octet-stream"; done
+          # shellcheck disable=SC2086
+          oras push "${IMAGE}:cli-${VERSION}" \
+            --artifact-type application/vnd.orchard-suite.tender.v1 \
+            --annotation "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --annotation "org.opencontainers.image.version=${VERSION}" \
+            --format go-template='{{.digest}}' \
+            $files SHA256SUMS:text/plain > ../digest.txt
+          echo "digest=$(cat ../digest.txt)" >> "$GITHUB_OUTPUT"
+      # Sign by digest, never by tag: a tag can move.
+      - name: Sign and verify tender
+        env:
+          REF: ${{ env.IMAGE }}@${{ steps.push.outputs.digest }}
+        run: |
+          cosign sign --yes "$REF"
+          cosign verify "$REF" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp '^https://github.com/${{ github.repository }}/' > /dev/null
