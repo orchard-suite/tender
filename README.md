@@ -218,6 +218,15 @@ make          # build and install ~/.local/bin/tender
 make check    # gofmt, vet for every OS, and every test
 ```
 
+On macOS the keychain lets only the program that made a key use it, and it
+knows a program by its signature. A release's macOS builds are signed with
+a Developer ID under the identifier `io.github.orchard-suite.tender`, so
+once a person lets Tender use its key, every later release may too. An
+unsigned build would ask again after each update, and wait for an answer.
+The release reads the Developer ID from the repository secrets
+`MACOS_SIGNING_P12` (the `.p12`, base64) and `MACOS_SIGNING_P12_PASSWORD`.
+`make` signs the same way when the Mac it runs on holds a Developer ID.
+
 ## License
 
 MIT.

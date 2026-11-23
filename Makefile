@@ -14,8 +14,14 @@ install: build
 		"$(PREFIX)/bin/tender" install; \
 	fi
 
+# On a Mac with a Developer ID, the build is signed the way a release is, so
+# the keychain keeps trusting it with the device key.
 build:
 	go build -trimpath -ldflags "$(LDFLAGS)" -o dist/tender ./cmd/tender
+	@if [ "$$(uname)" = Darwin ]; then \
+		id=$$(security find-identity -v -p codesigning 2>/dev/null | awk '/Developer ID Application/ {print $$2; exit}'); \
+		if [ -n "$$id" ]; then codesign --force --timestamp --identifier io.github.orchard-suite.tender --sign "$$id" dist/tender; fi; \
+	fi
 
 test:
 	go test ./...

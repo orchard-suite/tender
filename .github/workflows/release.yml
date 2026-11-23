@@ -46,5 +46,6 @@ jobs:
     needs: version
     if: needs.version.outputs.released == 'true'
     uses: ./.github/workflows/build.yml
+    secrets: inherit
     with:
       tag: ${{ needs.version.outputs.tag }}
