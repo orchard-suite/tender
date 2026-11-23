@@ -124,8 +124,20 @@ func newEnv(paths config.Paths, cmd string) (*env, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open the log: %w", err)
 	}
-	log := slog.New(slog.NewJSONHandler(w, nil)).With("command", cmd, "version", Version)
-	return &env{paths: paths, log: log, out: os.Stdout, file: w, now: time.Now}, nil
+	return &env{paths: paths, log: newLogger(w, cmd), out: os.Stdout, file: w, now: time.Now}, nil
+}
+
+// newLogger writes one JSON object per line, its time under `timestamp`.
+func newLogger(w io.Writer, cmd string) *slog.Logger {
+	h := slog.NewJSONHandler(w, &slog.HandlerOptions{
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if len(groups) == 0 && a.Key == slog.TimeKey {
+				a.Key = "timestamp"
+			}
+			return a
+		},
+	})
+	return slog.New(h).With("command", cmd, "version", Version)
 }
 
 func (e *env) close() { e.file.Close() }
