@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.6](https://github.com/orchard-suite/tender/compare/v0.0.5...v0.0.6) (2026-11-23)
+
+### Bug Fixes
+
+* **tender:** sign macos builds with a developer id ([d091542](https://github.com/orchard-suite/tender/commit/d091542f93419a9d7ec2728e87250a8c5003f432))
+
 ## [0.0.5](https://github.com/orchard-suite/tender/compare/v0.0.4...v0.0.5) (2026-11-23)
 
 ### Bug Fixes
