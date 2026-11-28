@@ -34,5 +34,8 @@ check:
 	GOOS=windows go vet ./...
 	go test ./...
 
-land: check
+# Lands main: release-damnit land runs the config's check (make check) on
+# exactly what lands and signs its proof, which the release verifies. From a
+# worktree: make land BRANCH=<branch>.
+land:
 	release-damnit land $(BRANCH)

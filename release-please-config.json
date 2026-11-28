@@ -3,6 +3,7 @@
   "include-component-in-tag": false,
   "types": ["feat", "fix", "chore", "docs"],
   "scopes": [],
+  "check": "make check",
   "packages": {
     ".": {
       "component": "tender",
